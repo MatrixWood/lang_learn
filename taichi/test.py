@@ -1,6 +1,6 @@
 import taichi as ti
 
-ti.init(arch=ti.gpu)
+ti.init(arch=ti.cpu)
 
 n = 320
 pixels = ti.field(dtype=float, shape=(n * 2, n))
@@ -20,11 +20,17 @@ def paint(t: float):
             iterations += 1
         pixels[i, j] = 1 - iterations * 0.02
 
-gui = ti.GUI("Julia Set", res=(n * 2, n))
+#gui = ti.GUI("Julia Set", res=(n * 2, n))
+#
+#i = 0
+#while gui.running:
+#    paint(i * 0.03)
+#    gui.set_image(pixels)
+#    gui.show()
+#    i = i + 1
 
-i = 0
-while gui.running:
-    paint(i * 0.03)
-    gui.set_image(pixels)
-    gui.show()
-    i = i + 1
+@ti.kernel
+def test(x: ti.f32) -> ti.f32:
+    return 1.0
+
+print(test(1.2))
