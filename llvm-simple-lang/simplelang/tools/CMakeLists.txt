@@ -4,11 +4,11 @@ set(LLVM_LINK_COMPONENTS
   Support
 )
 
-add_simplelang_tool(simplelangtools
+add_simplelang_tool(simplelanglexer
   driver.cpp
 )
 
-target_link_libraries(simplelangtools
+target_link_libraries(simplelanglexer
   PRIVATE
   simplelang
 )
