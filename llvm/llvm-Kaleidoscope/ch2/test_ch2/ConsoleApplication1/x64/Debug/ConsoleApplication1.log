@@ -1,4 +1,0 @@
-﻿  ConsoleApplication1.cpp
-D:\code\lang_learn\llvm-Kaleidoscope\ch2\test_ch2\ConsoleApplication1\ConsoleApplication1.cpp(34,13): warning C4326: “main”的返回类型应为“int”而非“void”
-D:\code\lang_learn\llvm-Kaleidoscope\ch2\test_ch2\ConsoleApplication1\ConsoleApplication1.cpp(32): warning C4715: “gettok”: 不是所有的控件路径都返回值
-  ConsoleApplication1.vcxproj -> D:\code\lang_learn\llvm-Kaleidoscope\ch2\test_ch2\x64\Debug\ConsoleApplication1.exe
