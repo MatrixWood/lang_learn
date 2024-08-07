@@ -70,10 +70,314 @@ my_rule:
 
 在这种情况下，如果输入字符串没有'else'块，第一个选择将失败，第二个选择将在没有该部分的情况下被尝试。
 
+## 语法
 
+语法由一系列形式如下的规则组成：
 
+```
+rule_name: expression
+```
 
+可选地，在规则名称之后可以包括一个类型，它指定了与规则对应的C或Python函数的返回类型：
 
+```
+rule_name[return_type]: expression
+```
+
+如果省略了返回类型，则在C中返回void *，在Python中返回Any。
+
+## 语法表达式
+
+### ```# comment```
+
+Python风格的注释。
+
+### ```e1 e2```
+
+匹配e1，然后匹配e2。
+
+```
+rule_name: first_rule second_rule
+```
+
+### ```e1 | e2```
+
+匹配e1或e2。
+
+第一个选择也可以出现在规则名称后的行上，出于格式化的目的。在这种情况下，必须在第一个选择之前使用|，如下所示：
+
+```
+rule_name[return_type]:
+    | first_alt
+    | second_alt
+```
+
+### ```( e )```
+
+匹配e。
+
+```
+rule_name: (e)
+```
+
+一个稍微复杂且有用的例子包括与重复操作符一起使用分组操作符：
+
+```
+rule_name: (e1 e2)*
+```
+
+### ```[ e ] 或 e?```
+
+可选地匹配e。
+
+```
+rule_name: [e]
+```
+
+一个更有用的例子包括定义尾随逗号是可选的：
+
+```
+rule_name: e (',' e)* [',']
+```
+
+### ```e*```
+
+匹配零个或多个e。
+
+```
+rule_name: (e1 e2)*
+```
+
+### ```e+```
+
+匹配一个或多个e。
+
+```
+rule_name: (e1 e2)+
+```
+
+### ```s.e+```
+
+匹配一个或多个由s分隔的e。生成的解析树不包括分隔符。这与(e (s e)*)在其他方面是相同的。
+
+```
+rule_name: ','.e+
+```
+
+### ```&e```
+
+如果e可以被解析，则成功，但不消耗任何输入。
+
+### ```!e```
+
+如果e可以被解析，则失败，但不消耗任何输入。
+
+一个从Python语法中取的例子指定了一个主体由一个原子组成，它不跟随一个.或(或[：
+
+```
+primary: atom !'.' !'(' !'['
+```
+
+### ```~```
+
+即使解析失败，也要坚持当前的选择（这称为“剪切”）。
+
+```
+rule_name: '(' ~ some_rule ')' | some_alt
+```
+
+在这个例子中，如果解析了一个左括号，即使some_rule或)未能被解析，也不会考虑其他选择。
+
+## 左递归
+
+PEG解析器通常不支持左递归，但CPython的解析器生成器实现了一种类似于Medeiros等人描述的技术，但使用记忆化缓存而不是静态变量。这种方法更接近Warth等人描述的方法。这使我们能够编写不仅仅是简单的左递归规则，还包括涉及间接左递归的更复杂的规则，如：
+
+```
+rule1: rule2 | 'a'
+rule2: rule3 | 'b'
+rule3: rule1 | 'c'
+```
+
+以及“隐藏的左递归”，如：
+
+```
+rule: 'optional'? rule ' some_other_rule
+```
+
+## 语法中的变量
+
+可以通过在它前面加上标识符和等号来命名子表达式。然后可以在动作中使用该名称（见下文），如下所示：
+
+```
+rule_name[return_type]: '(' a=some_other_rule ')' { a }
+```
+
+## 语法动作
+
+为了避免中间步骤使语法与AST生成之间的关系变得模糊，PEG解析器允许直接为规则生成AST节点通过语法动作。语法动作是在成功解析语法规则时评估的特定于语言的表达式。这些表达式可以用Python或C编写，这取决于解析器生成器的期望输出。这意味着，如果想要分别在Python和C中生成解析器，应该编写两个语法文件，每个文件都有一组不同的动作，除了这些动作之外，其他所有内容在两个文件中都是相同的。作为一个带有Python动作的语法的例子，解析器生成器的一部分，它解析语法文件是从一个带有Python动作的元语法文件引导的，这些动作生成解析结果的语法树。
+
+在Python的PEG语法的特定情况下，有动作允许直接在语法本身中描述AST是如何组成的，使其更清晰和可维护。这个AST生成过程得到了一些帮助函数的支持，这些函数抽象出常见的AST对象操作和一些其他不直接与语法相关的必需操作。
+
+为了指示这些动作，每个选择后面可以跟上花括号内的动作代码，它指定了选择的返回值：
+
+```
+rule_name[return_type]:
+    | first_alt1 first_alt2 { first_alt1 }
+    | second_alt1 second_alt2 { second_alt1 }
+```
+
+如果省略了动作，则会生成一个默认动作：
+
+- 如果规则中只有一个名称，则返回它。
+- 如果规则中有多个名称，则返回一个包含所有解析表达式的集合（集合的类型在C和Python中会不同）。
+
+这种默认行为主要是为了非常简单的情况和调试目的而设定的。
+
+> 警告：
+重要的是，动作不要改变通过变量引用其他规则传入的任何AST节点。不允许变异的原因是AST节点被记忆化缓存，并可能在不同的上下文中重用，在那里变异将是无效的。如果动作需要改变AST节点，它应该代替制作节点的新副本并改变那个。
+
+PEG生成器支持的语法的完整元语法是：
+
+```
+start[Grammar]: grammar ENDMARKER { grammar }
+
+grammar[Grammar]:
+    | metas rules { Grammar(rules, metas) }
+    | rules { Grammar(rules, []) }
+
+metas[MetaList]:
+    | meta metas { [meta] + metas }
+    | meta { [meta] }
+
+meta[MetaTuple]:
+    | "@" NAME NEWLINE { (name.string, None) }
+    | "@" a=NAME b=NAME NEWLINE { (a.string, b.string) }
+    | "@" NAME STRING NEWLINE { (name.string, literal_eval(string.string)) }
+
+rules[RuleList]:
+    | rule rules { [rule] + rules }
+    | rule { [rule] }
+
+rule[Rule]:
+    | rulename ":" alts NEWLINE INDENT more_alts DEDENT {
+            Rule(rulename[0], rulename[1], Rhs(alts.alts + more_alts.alts)) }
+    | rulename ":" NEWLINE INDENT more_alts DEDENT { Rule(rulename[0], rulename[1], more_alts) }
+    | rulename ":" alts NEWLINE { Rule(rulename[0], rulename[1], alts) }
+
+rulename[RuleName]:
+    | NAME '[' type=NAME '*' ']' {(name.string, type.string+"*")}
+    | NAME '[' type=NAME ']' {(name.string, type.string)}
+    | NAME {(name.string, None)}
+
+alts[Rhs]:
+    | alt "|" alts { Rhs([alt] + alts.alts)}
+    | alt { Rhs([alt]) }
+
+more_alts[Rhs]:
+    | "|" alts NEWLINE more_alts { Rhs(alts.alts + more_alts.alts) }
+    | "|" alts NEWLINE { Rhs(alts.alts) }
+
+alt[Alt]:
+    | items '$' action { Alt(items + [NamedItem(None, NameLeaf('ENDMARKER'))], action=action) }
+    | items '$' { Alt(items + [NamedItem(None, NameLeaf('ENDMARKER'))], action=None) }
+    | items action { Alt(items, action=action) }
+    | items { Alt(items, action=None) }
+
+items[NamedItemList]:
+    | named_item items { [named_item] + items }
+    | named_item { [named_item] }
+
+named_item[NamedItem]:
+    | NAME '=' ~ item {NamedItem(name.string, item)}
+    | item {NamedItem(None, item)}
+    | it=lookahead {NamedItem(None, it)}
+
+lookahead[LookaheadOrCut]:
+    | '&' ~ atom {PositiveLookahead(atom)}
+    | '!' ~ atom {NegativeLookahead(atom)}
+    | '~' {Cut()}
+
+item[Item]:
+    | '[' ~ alts ']' {Opt(alts)}
+    |  atom '?' {Opt(atom)}
+    |  atom '*' {Repeat0(atom)}
+    |  atom '+' {Repeat1(atom)}
+    |  sep=atom '.' node=atom '+' {Gather(sep, node)}
+    |  atom {atom}
+
+atom[Plain]:
+    | '(' ~ alts ')' {Group(alts)}
+    | NAME {NameLeaf(name.string) }
+    | STRING {StringLeaf(string.string)}
+
+# Mini-grammar for the actions
+
+action[str]: "{" ~ target_atoms "}" { target_atoms }
+
+target_atoms[str]:
+    | target_atom target_atoms { target_atom + " " + target_atoms }
+    | target_atom { target_atom }
+
+target_atom[str]:
+    | "{" ~ target_atoms "}" { "{" + target_atoms + "}" }
+    | NAME { name.string }
+    | NUMBER { number.string }
+    | STRING { string.string }
+    | "?" { "?" }
+    | ":" { ":" }
+```
+
+这个简单的语法文件作为示例，可以直接生成一个完整的解析器，该解析器能够解析简单的算术表达式，并返回一个基于C的有效Python AST：
+
+```c
+start[mod_ty]: a=expr_stmt* ENDMARKER { _PyAST_Module(a, NULL, p->arena) }
+expr_stmt[stmt_ty]: a=expr NEWLINE { _PyAST_Expr(a, EXTRA) }
+
+expr[expr_ty]:
+    | l=expr '+' r=term { _PyAST_BinOp(l, Add, r, EXTRA) }
+    | l=expr '-' r=term { _PyAST_BinOp(l, Sub, r, EXTRA) }
+    | term
+
+term[expr_ty]:
+    | l=term '*' r=factor { _PyAST_BinOp(l, Mult, r, EXTRA) }
+    | l=term '/' r=factor { _PyAST_BinOp(l, Div, r, EXTRA) }
+    | factor
+
+factor[expr_ty]:
+    | '(' e=expr ')' { e }
+    | atom
+
+atom[expr_ty]:
+    | NAME
+    | NUMBER
+```
+
+这里的EXTRA是一个宏，它扩展为start_lineno, start_col_offset, end_lineno, end_col_offset, p->arena，这些变量由解析器自动注入；p指向一个保存解析器所有状态的对象。
+
+写成针对Python AST对象的类似语法：
+
+```python
+start[ast.Module]: a=expr_stmt* ENDMARKER { ast.Module(body=a or []) }
+expr_stmt: a=expr NEWLINE { ast.Expr(value=a, EXTRA) }
+
+expr:
+    | l=expr '+' r=term { ast.BinOp(left=l, op=ast.Add(), right=r, EXTRA) }
+    | l=expr '-' r=term { ast.BinOp(left=l, op=ast.Sub(), right=r, EXTRA) }
+    | term
+
+term:
+    | l=term '*' r=factor { ast.BinOp(left=l, op=ast.Mult(), right=r, EXTRA) }
+    | l=term '/' r=factor { ast.BinOp(left=l, op=ast.Div(), right=r, EXTRA) }
+    | factor
+
+factor:
+    | '(' e=expr ')' { e }
+    | atom
+
+atom:
+    | NAME
+    | NUMBER
+```
 
 
 
