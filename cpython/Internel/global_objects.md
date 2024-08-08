@@ -188,4 +188,21 @@ bool_repr(PyObject *self)
 5. `_Py_SINGLETON(strings.identifiers._py_ ## NAME._ascii.ob_base)`：
    - 这个宏最终展开为访问 `_PyRuntime` 结构体中的 `singletons` 字段，然后进一步访问 `strings.identifiers` 中的特定标识符对象，最后获取该对象的基础 `PyObject` 结构体。
 
+这里
+```c
+#define _Py_ID(NAME) \
+     (_Py_SINGLETON(strings.identifiers._py_ ## NAME._ascii.ob_base))
+```
+的ob_base是一个PyObject
+但是
+```c
+#define _Py_GLOBAL_OBJECT(NAME) \
+    _PyRuntime.static_objects.NAME
+#define _Py_SINGLETON(NAME) \
+    _Py_GLOBAL_OBJECT(singletons.NAME)
+```
+_Py_SINGLETON里传入的是NAME, 实际上是_PyRuntime.static_objects.singletons.strings.identifiers._py_ ## NAME._ascii.ob_base，所以最后获取该对象的基础 `PyObject` 结构体。
+
+而这个结构体在`cpython/Include/internal/pycore_runtime_init.h`里面由`_Py_str_identifiers_INIT`全局初始化。
+
 总结来说，`_Py_ID` 宏通过一系列的结构体字段访问和获取一个预先创建的标识符字符串对象。这个对象是一个 Python 字符串对象，它已经被创建并缓存在全局单例结构体中，以便在解释器的核心代码中高效地使用。
