@@ -474,3 +474,350 @@ compiler_codegen(struct compiler *c, mod_ty mod)
 
 这个函数的作用是根据提供的模块类型，调用相应的编译函数来生成字节码。它处理了模块、交互式会话和单个表达式的编译，这些都是 Python 程序可能的顶层结构。错误处理在这里也很重要，任何编译步骤的失败都会导致整个函数返回错误代码。
 
+关注其中的`compiler_body`函数：
+
+```c
+/* Compile a sequence of statements, checking for a docstring
+   and for annotations. */
+
+static int
+compiler_body(struct compiler *c, location loc, asdl_stmt_seq *stmts)
+{
+    /* If from __future__ import annotations is active,
+     * every annotated class and module should have __annotations__.
+     * Else __annotate__ is created when necessary. */
+    if ((FUTURE_FEATURES(c) & CO_FUTURE_ANNOTATIONS) && SYMTABLE_ENTRY(c)->ste_annotations_used) {
+        ADDOP(c, loc, SETUP_ANNOTATIONS);
+    }
+    if (!asdl_seq_LEN(stmts)) {
+        return SUCCESS;
+    }
+    Py_ssize_t first_instr = 0;
+    if (!c->c_interactive) {
+        PyObject *docstring = _PyAST_GetDocString(stmts);
+        if (docstring) {
+            first_instr = 1;
+            /* if not -OO mode, set docstring */
+            if (c->c_optimize < 2) {
+                PyObject *cleandoc = _PyCompile_CleanDoc(docstring);
+                if (cleandoc == NULL) {
+                    return ERROR;
+                }
+                stmt_ty st = (stmt_ty)asdl_seq_GET(stmts, 0);
+                assert(st->kind == Expr_kind);
+                location loc = LOC(st->v.Expr.value);
+                ADDOP_LOAD_CONST(c, loc, cleandoc);
+                Py_DECREF(cleandoc);
+                RETURN_IF_ERROR(compiler_nameop(c, NO_LOCATION, &_Py_ID(__doc__), Store));
+            }
+        }
+    }
+    for (Py_ssize_t i = first_instr; i < asdl_seq_LEN(stmts); i++) {
+        VISIT(c, stmt, (stmt_ty)asdl_seq_GET(stmts, i));
+    }
+    // If there are annotations and the future import is not on, we
+    // collect the annotations in a separate pass and generate an
+    // __annotate__ function. See PEP 649.
+    if (!(FUTURE_FEATURES(c) & CO_FUTURE_ANNOTATIONS) &&
+         c->u->u_deferred_annotations != NULL) {
+
+        // It's possible that ste_annotations_block is set but
+        // u_deferred_annotations is not, because the former is still
+        // set if there are only non-simple annotations (i.e., annotations
+        // for attributes, subscripts, or parenthesized names). However, the
+        // reverse should not be possible.
+        PySTEntryObject *ste = SYMTABLE_ENTRY(c);
+        assert(ste->ste_annotation_block != NULL);
+        PyObject *deferred_anno = Py_NewRef(c->u->u_deferred_annotations);
+        void *key = (void *)((uintptr_t)ste->ste_id + 1);
+        if (compiler_setup_annotations_scope(c, loc, key,
+                                             ste->ste_annotation_block->ste_name) == -1) {
+            Py_DECREF(deferred_anno);
+            return ERROR;
+        }
+        Py_ssize_t annotations_len = PyList_Size(deferred_anno);
+        for (Py_ssize_t i = 0; i < annotations_len; i++) {
+            PyObject *ptr = PyList_GET_ITEM(deferred_anno, i);
+            stmt_ty st = (stmt_ty)PyLong_AsVoidPtr(ptr);
+            if (st == NULL) {
+                compiler_exit_scope(c);
+                Py_DECREF(deferred_anno);
+                return ERROR;
+            }
+            PyObject *mangled = _Py_Mangle(c->u->u_private, st->v.AnnAssign.target->v.Name.id);
+            ADDOP_LOAD_CONST_NEW(c, LOC(st), mangled);
+            VISIT(c, expr, st->v.AnnAssign.annotation);
+        }
+        Py_DECREF(deferred_anno);
+
+        RETURN_IF_ERROR(
+            compiler_leave_annotations_scope(c, loc, annotations_len)
+        );
+        RETURN_IF_ERROR(
+            compiler_nameop(c, loc, &_Py_ID(__annotate__), Store)
+        );
+    }
+    return SUCCESS;
+}
+```
+
+这个函数 `compiler_body` 是 Python 解释器内部用于编译一系列语句的函数。它还会检查文档字符串（docstring）和注解（annotations）。以下是逐行的详细解释：
+
+1. 函数定义和参数：
+   - `static int`: 函数返回类型为整型，`static` 表示函数的作用域限定在当前源文件内。
+   - `compiler_body`: 函数名。
+   - `struct compiler *c`: 指向编译器状态的指针。
+   - `location loc`: 表示当前代码块的位置信息。
+   - `asdl_stmt_seq *stmts`: 指向语句序列的指针。
+
+2. 检查是否启用了未来特性 `__future__ import annotations`：
+   - 如果启用了，并且符号表条目表明注解被使用了，那么添加 `SETUP_ANNOTATIONS` 操作码。
+
+3. 检查语句序列是否为空：
+   - 如果为空，直接返回 `SUCCESS`。
+
+4. 处理文档字符串：
+   - 如果不是交互模式，尝试从语句序列中获取文档字符串。
+   - 如果存在文档字符串，并且优化级别小于2（不是 `-OO` 模式），则设置文档字符串。
+
+5. 编译语句序列：
+   - 从 `first_instr` 开始遍历语句序列，使用 `VISIT` 宏来编译每个语句。
+
+6. 处理注解：
+   - 如果未来特性 `__future__ import annotations` 没有启用，并且存在延迟的注解，那么需要单独处理注解。
+   - 设置注解作用域，生成 `__annotate__` 函数。
+
+7. 错误处理和资源管理：
+   - 在处理文档字符串和注解时，如果遇到错误，会及时释放资源并返回错误代码。
+   - 使用 `RETURN_IF_ERROR` 宏来检查错误并在必要时返回。
+
+8. 函数结束：
+   - 如果所有步骤都成功执行，函数返回 `SUCCESS`。
+
+这个函数的作用是编译一个代码块中的所有语句，并处理文档字符串和注解。它考虑了未来特性和优化级别，以及交互模式下的特殊行为。错误处理在这里也很重要，确保在出现错误时能够正确地清理资源并返回错误代码。
+
+走到其内部的遍历stmts时，使用 `VISIT` 宏会调用`compiler_visit_stmt`函数：
+
+```c
+static int
+compiler_visit_stmt(struct compiler *c, stmt_ty s)
+{
+
+    switch (s->kind) {
+    case FunctionDef_kind:
+        return compiler_function(c, s, 0);
+    case ClassDef_kind:
+        return compiler_class(c, s);
+    case TypeAlias_kind:
+        return compiler_typealias(c, s);
+    case Return_kind:
+        return compiler_return(c, s);
+    case Delete_kind:
+        VISIT_SEQ(c, expr, s->v.Delete.targets)
+        break;
+    case Assign_kind:
+    {
+        Py_ssize_t n = asdl_seq_LEN(s->v.Assign.targets);
+        VISIT(c, expr, s->v.Assign.value);
+        for (Py_ssize_t i = 0; i < n; i++) {
+            if (i < n - 1) {
+                ADDOP_I(c, LOC(s), COPY, 1);
+            }
+            VISIT(c, expr,
+                  (expr_ty)asdl_seq_GET(s->v.Assign.targets, i));
+        }
+        break;
+    }
+    case AugAssign_kind:
+        return compiler_augassign(c, s);
+    case AnnAssign_kind:
+        return compiler_annassign(c, s);
+    case For_kind:
+        return compiler_for(c, s);
+    case While_kind:
+        return compiler_while(c, s);
+    case If_kind:
+        return compiler_if(c, s);
+    case Match_kind:
+        return compiler_match(c, s);
+    case Raise_kind:
+    {
+        Py_ssize_t n = 0;
+        if (s->v.Raise.exc) {
+            VISIT(c, expr, s->v.Raise.exc);
+            n++;
+            if (s->v.Raise.cause) {
+                VISIT(c, expr, s->v.Raise.cause);
+                n++;
+            }
+        }
+        ADDOP_I(c, LOC(s), RAISE_VARARGS, (int)n);
+        break;
+    }
+    case Try_kind:
+        return compiler_try(c, s);
+    case TryStar_kind:
+        return compiler_try_star(c, s);
+    case Assert_kind:
+        return compiler_assert(c, s);
+    case Import_kind:
+        return compiler_import(c, s);
+    case ImportFrom_kind:
+        return compiler_from_import(c, s);
+    case Global_kind:
+    case Nonlocal_kind:
+        break;
+    case Expr_kind:
+    {
+        return compiler_stmt_expr(c, LOC(s), s->v.Expr.value);
+    }
+    case Pass_kind:
+    {
+        ADDOP(c, LOC(s), NOP);
+        break;
+    }
+    case Break_kind:
+    {
+        return compiler_break(c, LOC(s));
+    }
+    case Continue_kind:
+    {
+        return compiler_continue(c, LOC(s));
+    }
+    case With_kind:
+        return compiler_with(c, s, 0);
+    case AsyncFunctionDef_kind:
+        return compiler_function(c, s, 1);
+    case AsyncWith_kind:
+        return compiler_async_with(c, s, 0);
+    case AsyncFor_kind:
+        return compiler_async_for(c, s);
+    }
+
+    return SUCCESS;
+}
+```
+
+这个函数 `compiler_visit_stmt` 是 Python 解释器内部用于编译单个语句的函数。它根据语句的类型（`kind`）来决定如何编译。以下是逐行的详细解释：
+
+1. 函数定义和参数：
+   - `static int`: 函数返回类型为整型，`static` 表示函数的作用域限定在当前源文件内。
+   - `compiler_visit_stmt`: 函数名。
+   - `struct compiler *c`: 指向编译器状态的指针。
+   - `stmt_ty s`: 指向要编译的语句的指针。
+
+2. `switch` 语句：根据语句的类型（`s->kind`）来执行不同的编译策略。
+
+3. `FunctionDef_kind`：编译一个函数定义。
+
+4. `ClassDef_kind`：编译一个类定义。
+
+5. `TypeAlias_kind`：编译一个类型别名。
+
+6. `Return_kind`：编译一个返回语句。
+
+7. `Delete_kind`：编译一个删除语句，遍历并访问所有要删除的目标。
+
+8. `Assign_kind`：编译一个赋值语句，包括复制值以用于多个目标的情况。
+
+9. `AugAssign_kind`：编译一个增量赋值语句（例如 `x += 1`）。
+
+10. `AnnAssign_kind`：编译一个带注解的赋值语句。
+
+11. `For_kind`：编译一个 `for` 循环。
+
+12. `While_kind`：编译一个 `while` 循环。
+
+13. `If_kind`：编译一个 `if` 语句。
+
+14. `Match_kind`：编译一个 `match` 语句（Python 3.10+ 的模式匹配）。
+
+15. `Raise_kind`：编译一个 `raise` 异常语句。
+
+16. `Try_kind`：编译一个 `try` 语句。
+
+17. `TryStar_kind`：编译一个 `try*` 语句（PEP 622 提案中的语法，可能在未来版本中实现）。
+
+18. `Assert_kind`：编译一个 `assert` 断言语句。
+
+19. `Import_kind`：编译一个 `import` 语句。
+
+20. `ImportFrom_kind`：编译一个 `from ... import ...` 语句。
+
+21. `Global_kind` 和 `Nonlocal_kind`：处理全局和非局部声明，这些声明不需要生成字节码。
+
+22. `Expr_kind`：编译一个表达式语句。
+
+23. `Pass_kind`：编译一个 `pass` 语句，生成一个 `NOP`（无操作）指令。
+
+24. `Break_kind`：编译一个 `break` 语句。
+
+25. `Continue_kind`：编译一个 `continue` 语句。
+
+26. `With_kind`：编译一个 `with` 语句。
+
+27. `AsyncFunctionDef_kind`：编译一个异步函数定义。
+
+28. `AsyncWith_kind`：编译一个异步 `with` 语句。
+
+29. `AsyncFor_kind`：编译一个异步 `for` 循环。
+
+30. 返回 `SUCCESS`：如果语句类型不需要特殊处理，函数返回成功。
+
+这个函数的作用是根据语句的类型调用相应的编译函数或执行相应的编译逻辑。它是编译器的核心部分之一，负责将 Python 代码转换为字节码。每种语句类型都有相应的处理逻辑，确保正确地生成字节码。
+
+这里暂时不再深入具体的compiler接口里，调用栈会根据测试的python用例变得非常深，最终它会走到`cpython/Python/instruction_sequence.c`中的`_PyInstructionSequence_Addop`里，用于生成字节码指令：
+
+```c
+int
+_PyInstructionSequence_Addop(instr_sequence *seq, int opcode, int oparg,
+                             location loc)
+{
+    assert(0 <= opcode && opcode <= MAX_OPCODE);
+    assert(IS_WITHIN_OPCODE_RANGE(opcode));
+    assert(OPCODE_HAS_ARG(opcode) || HAS_TARGET(opcode) || oparg == 0);
+    assert(0 <= oparg && oparg < (1 << 30));
+
+    int idx = instr_sequence_next_inst(seq);
+    RETURN_IF_ERROR(idx);
+    instruction *ci = &seq->s_instrs[idx];
+    ci->i_opcode = opcode;
+    ci->i_oparg = oparg;
+    ci->i_loc = loc;
+    return SUCCESS;
+}
+```
+
+这个函数 `_PyInstructionSequence_Addop` 是用于向 Python 字节码指令序列中添加一个操作码（opcode）的函数。以下是逐行的详细解释：
+
+1. 函数定义和参数：
+   - `int`: 函数返回类型为整型。
+   - `_PyInstructionSequence_Addop`: 函数名。
+   - `instr_sequence *seq`: 指向指令序列的指针。
+   - `int opcode`: 要添加的操作码。
+   - `int oparg`: 操作码的参数。
+   - `location loc`: 指令的位置信息，通常包含行号和列号。
+
+2. `assert` 语句：这些是调试检查，确保传入的参数是有效的。
+   - 确保 `opcode` 在有效范围内（`0 <= opcode <= MAX_OPCODE`）。
+   - 确保 `opcode` 在定义的操作码范围内（`IS_WITHIN_OPCODE_RANGE(opcode)`）。
+   - 确保如果操作码不需要参数，那么 `oparg` 应该为 0（`OPCODE_HAS_ARG(opcode) || HAS_TARGET(opcode) || oparg == 0`）。
+   - 确保 `oparg` 在有效范围内（`0 <= oparg && oparg < (1 << 30)`）。
+
+3. 获取下一个指令的索引：
+   - `int idx = instr_sequence_next_inst(seq);` 调用 `instr_sequence_next_inst` 函数来获取序列中下一个指令的索引。
+
+4. 错误检查：
+   - `RETURN_IF_ERROR(idx);` 如果获取索引时出现错误（例如，如果 `idx` 是一个错误代码），则返回。
+
+5. 设置指令的详细信息：
+   - `instruction *ci = &seq->s_instrs[idx];` 获取指向新指令的指针。
+   - `ci->i_opcode = opcode;` 设置指令的操作码。
+   - `ci->i_oparg = oparg;` 设置指令的参数。
+   - `ci->i_loc = loc;` 设置指令的位置信息。
+
+6. 返回成功：
+   - `return SUCCESS;` 如果一切顺利，函数返回成功代码。
+
+这个函数是 Python 字节码编译过程的一部分，用于将操作码和其参数添加到指令序列中。这些指令序列最终会被 Python 虚拟机执行。
+
